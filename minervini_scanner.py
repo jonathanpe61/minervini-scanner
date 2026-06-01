@@ -196,12 +196,14 @@ def compute_indicators(df, slope_window=22):
     s150 = float(sma150.iloc[-1])
     s200 = float(sma200.iloc[-1])
     s200_prev = float(sma200.iloc[-1 - slope_window])
+    s150_prev = float(sma150.iloc[-1 - slope_window])
 
     win = close.iloc[-252:] if len(close) >= 252 else close
     low52 = float(win.min())
     high52 = float(win.max())
 
     slope200 = (s200 - s200_prev) / s200_prev * 100.0 if s200_prev else 0.0
+    slope150 = (s150 - s150_prev) / s150_prev * 100.0 if s150_prev else 0.0
     pct_above_150 = (price / s150 - 1.0) * 100.0
     pct_above_50 = (price / s50 - 1.0) * 100.0
     pct_above_low = (price / low52 - 1.0) * 100.0
@@ -217,7 +219,7 @@ def compute_indicators(df, slope_window=22):
 
     return dict(
         price=price, sma50=s50, sma150=s150, sma200=s200,
-        slope200=slope200, pct_above_150=pct_above_150, pct_above_50=pct_above_50,
+        slope200=slope200, slope150=slope150, pct_above_150=pct_above_150, pct_above_50=pct_above_50,
         pct_above_low=pct_above_low, pct_from_high=pct_from_high,
         low52=low52, high52=high52, rs_raw=rs_raw, n_bars=int(len(close)),
         _close=close, _sma50=sma50, _sma150=sma150, _sma200=sma200,
@@ -239,6 +241,12 @@ def evaluate_trend_template(m, p):
     return c
 
 
+def micha_test(m, lo=-2.0, hi=5.0):
+    """Micho Method (a simpler screen): the 150-day SMA is rising AND price sits
+    within [lo, hi]% of the 150-day SMA (default -2% to +5%)."""
+    return bool((m["slope150"] > 0.0) and (lo <= m["pct_above_150"] <= hi))
+
+
 # ----------------------------------------------------------------------------
 # Composite ranking ("a mix of all")
 # ----------------------------------------------------------------------------
@@ -248,13 +256,13 @@ def _pct_rank(series):
     return r.fillna(0.5)
 
 
-def add_scores(M):
+def add_scores(M, mask_col="passed"):
     """Add rs_rating (1-99 vs scanned universe) and composite (0-100 among qualifiers)."""
     M = M.copy()
     # RS rating is ranked across the WHOLE scanned universe (market-relative).
     M["rs_rating"] = (_pct_rank(M["rs_raw"]) * 98 + 1).round().astype(int)
 
-    q = M[M["passed"]].copy()
+    q = M[M[mask_col]].copy()
     if len(q) == 0:
         M["composite"] = np.nan
         return M, q
@@ -348,9 +356,17 @@ def main():
     ap.add_argument("--ext-max", dest="ext_max", type=float, default=DEFAULTS["ext_max"])
     ap.add_argument("--low-min", dest="low_min", type=float, default=DEFAULTS["low_min"])
     ap.add_argument("--high-within", dest="high_within", type=float, default=DEFAULTS["high_within"])
+    ap.add_argument("--screen", choices=["template", "micha"], default="template",
+                    help="template = full 8-condition screen; micha = Micho Method only")
+    ap.add_argument("--micha-band", dest="micha_band", default="-2,5",
+                    help="Micho Method band vs the 150-day SMA, e.g. -2,5")
     args = ap.parse_args()
 
     p = build_params(args)
+    try:
+        mlo, mhi = [float(x) for x in args.micha_band.split(",")]
+    except Exception:
+        mlo, mhi = -2.0, 5.0
     os.makedirs(args.outdir, exist_ok=True)
 
     print("=" * 70)
@@ -373,13 +389,14 @@ def main():
         if m is None:
             continue
         crit = evaluate_trend_template(m, p)
+        mt = micha_test(m, mlo, mhi)
         n_pass = sum(1 for k, v in crit.items() if k != "passed" and v)
         indicators[t] = m
         rows.append(dict(
             ticker=t, price=m["price"], sma50=m["sma50"], sma150=m["sma150"],
-            sma200=m["sma200"], slope200=m["slope200"], pct_above_150=m["pct_above_150"],
+            sma200=m["sma200"], slope200=m["slope200"], slope150=m["slope150"], pct_above_150=m["pct_above_150"],
             pct_above_low=m["pct_above_low"], pct_from_high=m["pct_from_high"],
-            rs_raw=m["rs_raw"], passed=crit["passed"], n_pass=n_pass,
+            rs_raw=m["rs_raw"], passed=crit["passed"], micha=mt, n_pass=n_pass,
             criteria={k: bool(v) for k, v in crit.items() if k != "passed"},
         ))
 
@@ -388,11 +405,12 @@ def main():
         return
 
     M = pd.DataFrame(rows).set_index("ticker")
-    M, Q = add_scores(M)
+    mask = "micha" if args.screen == "micha" else "passed"
+    M, Q = add_scores(M, mask_col=mask)
 
     # ---- Console table -----------------------------------------------------
     print("=" * 70)
-    print(f"QUALIFIERS: {len(Q)} of {len(M)} stocks passed all 8 conditions")
+    print(f"QUALIFIERS [{args.screen}]: {len(Q)} of {len(M)} stocks selected")
     print("=" * 70)
     if len(Q):
         show = Q[["rank", "price", "rs_rating", "composite", "slope200",
@@ -446,12 +464,12 @@ def main():
         stocks.append(dict(
             ticker=t, rank=int(r["rank"]), price=round(float(r["price"]), 2),
             sma50=round(float(r["sma50"]), 2), sma150=round(float(r["sma150"]), 2),
-            sma200=round(float(r["sma200"]), 2), slope200=round(float(r["slope200"]), 2),
+            sma200=round(float(r["sma200"]), 2), slope200=round(float(r["slope200"]), 2), slope150=round(float(r["slope150"]), 2),
             pct_above_150=round(float(r["pct_above_150"]), 2),
             pct_above_low=round(float(r["pct_above_low"]), 2),
             pct_from_high=round(float(r["pct_from_high"]), 2),
             rs_rating=int(r["rs_rating"]), composite=round(float(r["composite"]), 1),
-            criteria=r["criteria"], passed=True,
+            criteria=r["criteria"], passed=True, micha=bool(r["micha"]),
             series=series_for(t) if t in chart_tickers else None,
         ))
     # A few near-misses (failed only 1-2 conditions) are handy context.
@@ -462,7 +480,7 @@ def main():
 
     payload = dict(
         generated_at=datetime.now(timezone.utc).isoformat(),
-        params=p, weights=WEIGHTS, universe=args.universe,
+        params=p, weights=WEIGHTS, screen=args.screen, universe=args.universe,
         scanned=int(len(M)), qualified=int(len(Q)),
         stocks=stocks, near_misses=near_misses,
     )
