@@ -1,21 +1,9 @@
-"""
-Minervini Trend Template Scanner - Streamlit web app.
-
-Reuses minervini_scanner.py. Two screens:
-  - Full Trend Template (all 8 conditions, ranked by the composite)
-  - Micho Method (simpler): the 150-day SMA is rising AND price sits within a band
-    around it (default -2% to +5%). The distance above the 150-day is your risk
-    if you set the stop at the 150-day line.
-
-Run locally:  streamlit run app.py
-Educational technical screen - NOT investment advice.
-"""
+"""Minervini Trend Template Scanner - Streamlit web app (Full template + Micho Method)."""
 import streamlit as st
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 import minervini_scanner as ms
 
 st.set_page_config(page_title="Minervini Trend Scanner", page_icon="📈", layout="wide")
@@ -32,8 +20,9 @@ with st.sidebar:
         custom = st.text_area("Tickers (comma-separated)",
                               "NVDA,META,LLY,GS,VRT,MS,JPM,AVGO,LRCX,ANET,PANW,MMC,FAST")
     maxn = st.number_input("Max tickers (caps runtime)", 10, 600, 150, 10)
-    period = st.selectbox("History window", ["2y", "1y"], 0)
-
+    period = st.selectbox("History window", ["2y", "1y"], 0,
+                          help="Use 2y: it guarantees enough history for the 200-day SMA, its slope, "
+                               "and the RS rating. 1y is borderline and makes RS unreliable.")
     if micha_mode:
         st.caption("Micho Method = 150-day SMA rising AND price inside this band vs the 150-day:")
         mlo = st.slider("Lower bound (% below 150-day allowed)", -10.0, 0.0, -2.0, 0.5)
@@ -44,18 +33,15 @@ with st.sidebar:
                         help="If your stop sits at the 150-day line, this is your max loss.")
         emin = st.slider("Min % above 150-day SMA", 0.0, 5.0, 0.0, 0.5)
         mlo, mhi = -2.0, 5.0
-
     ncharts = st.slider("Charts to show", 1, 20, 8)
     run = st.button("Run scan", type="primary")
 
 if micha_mode:
     st.info("**Micho Method**: keeps stocks whose 150-day SMA is rising and whose price is within "
-            f"{mlo:.0f}% to {mhi:.0f}% of that 150-day line. The distance above the 150-day is your "
-            "risk if you stop out there. Ranked by the composite (RS, trend, momentum, non-overextension).")
+            f"{mlo:.0f}% to {mhi:.0f}% of that 150-day line. Ranked by the composite.")
 else:
-    st.info("**Full template**: all 8 trend-template conditions. Composite ranking = relative strength "
-            "35%, trend 20%, momentum 15%, non-overextension 30%. 'Stop risk' = how far price is above "
-            "its 150-day SMA (your loss if stopped out there).")
+    st.info("**Full template**: all 8 trend-template conditions. 'Stop risk' = how far price is above "
+            "its 150-day SMA (your loss if stopped out at the 150-day line).")
 
 
 @st.cache_data(show_spinner=False)
@@ -119,18 +105,17 @@ c2.metric("Qualified", len(Q))
 c3.metric("Top pick", Q.index[0] if len(Q) else "-")
 
 if len(Q) == 0:
-    st.info("Nothing passed with these settings. Loosen the band (Micho) or the stop-risk cap (template).")
+    st.info("Nothing passed with these settings. Loosen the band (Micho Method) or the stop-risk cap.")
     st.stop()
 
 top = Q.iloc[0]
 if micha_mode:
-    st.success(f"**Top Micho-Method pick: {top.name}** - 150-day SMA rising ({top['slope150']:.1f}% over the window); "
-               f"price {top['pct_above_150']:+.1f}% vs its 150-day (band {mlo:.0f}% to {mhi:.0f}%). "
-               f"Stop at the 150-day is ~{abs(top['pct_above_150']):.1f}% away. RS {int(top['rs_rating'])}.")
+    st.success(f"**Top Micho-Method pick: {top.name}** - 150-day SMA rising ({top['slope150']:.1f}%); "
+               f"price {top['pct_above_150']:+.1f}% vs its 150-day. Stop at the 150-day ~{abs(top['pct_above_150']):.1f}% away. "
+               f"RS {int(top['rs_rating'])}.")
 else:
     st.success(f"**Top pick: {top.name}** - composite {top['composite']:.1f}/100, RS {int(top['rs_rating'])}, "
-               f"stop risk to the 150-day ~ {top['pct_above_150']:.1f}%. "
-               f"Trades +{top['pct_above_low']:.0f}% off its 52-week low, {top['pct_from_high']:.0f}% from its high.")
+               f"stop risk to the 150-day ~ {top['pct_above_150']:.1f}%.")
 
 show = Q[["rank", "price", "rs_rating", "composite", "pct_above_150", "slope150",
           "slope200", "pct_above_low", "pct_from_high"]].copy()
@@ -142,12 +127,13 @@ st.dataframe(show.style.format({"price": "{:.2f}", "Score": "{:.1f}", "StopRisk�
              "150d slope %": "{:.1f}", "200d slope %": "{:.1f}", "% > 52w low": "{:.0f}",
              "% from 52w high": "{:.0f}"}), use_container_width=True)
 
-st.download_button("Download qualifiers (CSV)", data=Q.drop(columns=["criteria"]).to_csv().encode(),
+st.download_button("Download qualifiers (CSV)",
+                   data=Q.drop(columns=["criteria"], errors="ignore").to_csv().encode(),
                    file_name="qualifiers.csv", mime="text/csv")
 
 st.subheader("Price + moving-average charts")
 for t in list(Q.index[:int(ncharts)]):
-    st.markdown(f"**{t}** — stop risk to 150-day ≈ {Q.loc[t, 'pct_above_150']:.1f}%  ·  "
+    st.markdown(f"**{t}** - stop risk to 150-day ~ {Q.loc[t, 'pct_above_150']:.1f}%  ·  "
                 f"150d slope {Q.loc[t, 'slope150']:+.1f}%  ·  RS {int(Q.loc[t, 'rs_rating'])}  ·  "
                 f"Micho {'✓' if Q.loc[t, 'micha'] else '✗'}")
     st.pyplot(make_fig(t, ind[t]))
